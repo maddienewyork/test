@@ -1,0 +1,53 @@
+# Example portfolio. Each trial inherits `defaults` and can override any field.
+# Run:  python -m trialpower run examples/trials.yaml --csv results.csv
+#
+# Effects are always Treatment minus Control (or HR of Treatment vs Control).
+# phase2 accepts any ONE of:
+#   {estimate, se}                       generic (se of log HR for survival)
+#   {mean_t, mean_c, sd, n_t, n_c}       continuous
+#   {x_t, n_t, x_c, n_c}                 binary responder counts
+#   {hr, lower, upper[, level]}          HR with confidence interval
+#   {hr, events[, ratio]}                HR with number of events
+
+defaults:
+  alpha: 0.05        # overall type-I error
+  sides: 2           # 2 = two-sided test (alpha/2 in the favourable direction)
+  ratio: 1           # allocation treatment:control
+  dropout: 0.10
+  dropout_handling: exclude  # exclude (complete-case) | dilute (ITT, dropouts lose effect) | nri (binary)
+  haircut: 0.20      # shrink Phase II effect 20% towards zero
+  weight: 1.0        # 0.5 = treat Phase II as half as informative
+  prob_effect: 1.0   # P(drug truly works); <1 adds a point mass at zero effect
+  n_trials: 1        # pivotal trials that must ALL succeed
+  target_power: 0.90
+
+trials:
+  - name: DM-301 HbA1c change at wk26
+    endpoint: continuous
+    higher_is_better: false   # bigger HbA1c reduction is better
+    sd: 1.1
+    n_total: 400
+    phase2: {mean_t: -0.95, mean_c: -0.40, sd: 1.1, n_t: 60, n_c: 60}
+    mcid: -0.3                # must beat placebo by >= 0.3% to be commercially viable
+
+  - name: DERM-301 IGA 0/1 response
+    endpoint: binary
+    p_control: 0.15
+    n_total: 300
+    ratio: 2
+    phase2: {x_t: 22, n_t: 50, x_c: 7, n_c: 50}
+    dropout_t: 0.15           # per-arm dropout (overrides `dropout`)
+    dropout_c: 0.10
+    dropout_handling: nri     # exclude | dilute | nri (binary only)
+    mcid: 0.10
+    n_trials: 2               # two replicate pivotal trials
+
+  - name: ONC-301 PFS
+    endpoint: survival
+    event_prob: 0.70          # see trialpower.event_probability(...)
+    n_total: 450
+    dropout: 0.05
+    phase2: {hr: 0.62, lower: 0.42, upper: 0.92}
+    haircut: 0.30
+    prob_effect: 0.80
+    mcid: 0.80
