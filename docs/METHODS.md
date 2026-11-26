@@ -62,7 +62,28 @@ Outputs worth watching:
 * **P(win is real)** — among simulated wins, the share with a true effect at least
   the minimum meaningful effect.
 
+**4. Enrollment simulation (Enrollment tab / `python -m trialpower enroll`).**
+Poisson–gamma recruitment model (Anisimov & Fedorov 2007):
+
+* sites open uniformly between the first and last activation month, then ramp
+  linearly to full speed;
+* each site recruits as a Poisson process at `mean rate × site factor`, with the site
+  factor ~ Gamma(mean 1, CV = site variability);
+* the mean rate itself ~ Gamma(planned rate, CV = rate uncertainty), which is usually
+  the biggest reason trials finish late;
+* **re-forecast:** with *n* patients after *t* months, the mean-rate prior is updated
+  to Gamma(a₀ + n, b₀ + site-months of exposure), and the rest of the trial is simulated;
+* **events (time-to-event):** each patient gets an exponential event time (control
+  median, HR) and an exponential loss-to-follow-up time; the final analysis happens
+  when the target number of events is reached;
+* **sites needed:** the smallest number of sites giving P(last patient in by the
+  deadline) ≥ the chosen probability, found by bisection over simulations.
+
+Outputs: planned vs simulated last-patient-in (median, 80% interval), P(LPI by a
+deadline), fan charts of patients and events, timing of the final analysis, and a
+month-by-month table (CSV).
+
 ### Not covered (yet)
-Group-sequential / interim analyses, non-inferiority margins, multiplicity across
+Group-sequential / interim analyses, per-country or per-site caps on enrollment, non-inferiority margins, multiplicity across
 endpoints, non-proportional hazards, regulatory/commercial success beyond the
 primary endpoint.

@@ -14,6 +14,10 @@ Two connected tools:
    - Success = statistically significant **and** an observed effect ≥ a **minimum clinically meaningful effect**. You can optionally require **k pivotal trials** to all succeed; they are correlated through the shared true effect.
    - Outputs: PoS, the **success threshold** (the minimum observed effect that wins), P(true effect favours drug) (the PoS ceiling), P(win is real), PoS vs N, and a haircut × P(works) sensitivity grid.
 
+3. **Enrollment simulation.** Monte Carlo recruitment forecasts using the Poisson–gamma model: site activation, ramp-up, variation between sites, and uncertainty in the planned rate.
+   - Outputs: the last-patient-in distribution and P(LPI by a deadline), enrollment and event fan charts, final-analysis timing for time-to-event trials, and a month-by-month CSV.
+   - **How many sites do I need**, and a **re-forecast** that updates the projection with actual enrollment to date.
+
 See [`docs/METHODS.md`](docs/METHODS.md) for the statistics.
 
 ## Quick start
@@ -22,6 +26,7 @@ See [`docs/METHODS.md`](docs/METHODS.md) for the statistics.
 pip install -r requirements.txt
 streamlit run app.py                                   # interactive app
 python -m trialpower run examples/trials.yaml --csv results.csv   # portfolio from YAML
+python -m trialpower enroll --target 400 --sites 40 --rate 0.8 --ramp 2 --events 250   # enrollment forecast
 pytest                                                 # tests
 ```
 

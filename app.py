@@ -5,6 +5,7 @@ Run:  streamlit run app.py
 from __future__ import annotations
 
 import io
+import math
 from pathlib import Path
 
 import altair as alt
@@ -15,6 +16,7 @@ import streamlit as st
 from trialpower import (GRID_PARAMS, EffectPrior, Phase2Evidence, TrialDesign, event_probability, make_endpoint,
                         power_grid,
                         pos_curve, simulate_pos)
+from trialpower.enrollment import EnrollmentPlan, EventModel, simulate_enrollment, sites_needed
 from trialpower.portfolio import COLUMNS, evaluate, load_yaml
 
 HERE = Path(__file__).parent
@@ -144,7 +146,8 @@ seed = sb.number_input("Random seed", 0, value=1)
 
 # ----------------------------------------------------------------------------- main
 st.title("Clinical trial power & probability of success")
-tab_pow, tab_pos, tab_port, tab_help = st.tabs(["Power", "Probability of success", "Portfolio", "Methods"])
+tab_pow, tab_pos, tab_enr, tab_port, tab_help = st.tabs(
+    ["Power", "Probability of success", "Enrollment", "Portfolio", "Methods"])
 
 # ---------------- Power
 with tab_pow:
@@ -390,6 +393,158 @@ with tab_pos:
         index=[f"P(works) {p:.0%}" for p in pes], columns=[f"haircut {h:.0%}" for h in hcs])
     st.dataframe(grid.style.format("{:.1%}").background_gradient(cmap="Blues", vmin=0, vmax=1),
                  width="stretch")
+
+# ---------------- Enrollment
+@st.cache_data(show_spinner="Simulating enrollment…")
+def _run_enrollment(plan_kw, ev_kw, n_sims, seed, elapsed, enrolled):
+    ev_ = EventModel(**ev_kw) if ev_kw else None
+    return simulate_enrollment(EnrollmentPlan(**plan_kw), n_sims, seed, elapsed, enrolled, ev_)
+
+
+def fan_chart(res, q_dict, mean_unused, target_val, ylab, planned=None):
+    ends = [x[np.isfinite(x)] for x in (res.completion, res.event_completion) if x is not None]
+    ends = np.concatenate(ends) if ends else np.array([])
+    t_max = np.quantile(ends, 0.99) * 1.1 if len(ends) else res.grid[-1]
+    keep = res.grid <= max(t_max, res.grid[0] + 1)
+    g = res.grid[keep]
+    df = pd.DataFrame({"Month": g, "p10": q_dict[0.10][keep], "p90": q_dict[0.90][keep], "p25": q_dict[0.25][keep],
+                       "p75": q_dict[0.75][keep], "Median": q_dict[0.50][keep]})
+    band80 = alt.Chart(df).mark_area(color=BLUE, opacity=0.18).encode(
+        x=alt.X("Month:Q", title="Months from first site open"), y=alt.Y("p10:Q", title=ylab), y2="p90:Q")
+    band50 = alt.Chart(df).mark_area(color=BLUE, opacity=0.30).encode(x="Month:Q", y="p25:Q", y2="p75:Q")
+    med = alt.Chart(df).mark_line(color=BLUE, strokeWidth=2).encode(
+        x="Month:Q", y="Median:Q",
+        tooltip=[alt.Tooltip("Month:Q", format=".1f"), alt.Tooltip("p10:Q", format=".0f", title="10th pct"),
+                 alt.Tooltip("Median:Q", format=".0f"), alt.Tooltip("p90:Q", format=".0f", title="90th pct")])
+    layers = band80 + band50 + med
+    if planned is not None:
+        dp = pd.DataFrame({"Month": g, "Planned": planned[keep]})
+        layers += alt.Chart(dp).mark_line(color=ORANGE, strokeWidth=2, strokeDash=[6, 4]).encode(
+            x="Month:Q", y="Planned:Q", tooltip=[alt.Tooltip("Month:Q", format=".1f"),
+                                                 alt.Tooltip("Planned:Q", format=".0f")])
+    layers += alt.Chart(pd.DataFrame({"t": [target_val]})).mark_rule(color=GRAY, strokeDash=[4, 4]).encode(y="t:Q")
+    return layers.interactive()
+
+
+def month_hist(x, title):
+    f = x[np.isfinite(x)]
+    if not len(f):
+        return None
+    bins = np.arange(np.floor(f.min()), np.ceil(f.max()) + 1, 0.5 if np.ptp(f) < 15 else 1.0)
+    h, e = np.histogram(f, bins)
+    df = pd.DataFrame({"from": e[:-1], "to": e[1:], "Share": h / len(x)})
+    return alt.Chart(df).mark_rect(color=BLUE, stroke="white", strokeWidth=1).encode(
+        x=alt.X("from:Q", title=title), x2="to:Q", y=alt.Y("Share:Q", axis=alt.Axis(format="%"), title="Share of simulations"),
+        tooltip=[alt.Tooltip("from:Q", title="from month"), alt.Tooltip("to:Q", title="to month"),
+                 alt.Tooltip("Share:Q", format=".1%")])
+
+
+with tab_enr:
+    st.markdown("Monte Carlo recruitment forecast (Poisson–gamma model): sites open over time and ramp up, "
+                "site speeds vary, and the planned rate itself is uncertain.")
+    c = st.columns(4)
+    e_target = c[0].number_input("Patients to randomise", 2, value=int(n_total), step=10, key="e_target")
+    e_sites = c[1].number_input("Sites", 1, value=40, key="e_sites")
+    e_rate = c[2].number_input("Patients / site / month (full speed)", 0.01, value=0.8, step=0.1, format="%.2f",
+                               key="e_rate")
+    e_sf = c[3].number_input("Screen-fail rate", 0.0, 0.95, 0.25, 0.05, key="e_sf",
+                             help="Only used to report how many patients must be screened.")
+    c = st.columns(5)
+    e_a0 = c[0].number_input("First site opens (month)", 0.0, value=0.0, key="e_a0")
+    e_a1 = c[1].number_input("Last site opens (month)", 0.0, value=6.0, key="e_a1")
+    e_ramp = c[2].number_input("Site ramp-up (months)", 0.0, value=2.0, key="e_ramp",
+                               help="Months for a newly opened site to reach full speed (linear ramp).")
+    e_scv = c[3].number_input("Site-to-site variability (CV)", 0.0, 3.0, 0.8, 0.1, key="e_scv",
+                              help="0 = all sites identical; ~0.8–1.2 is typical (a few sites recruit most patients).")
+    e_rcv = c[4].number_input("Uncertainty in planned rate (CV)", 0.0, 2.0, 0.25, 0.05, key="e_rcv",
+                              help="How wrong the planning rate could be. 0.2–0.4 is realistic before first patient in.")
+
+    with st.expander("Re-forecast an ongoing trial"):
+        refc = st.checkbox("Use actual enrollment to date", key="e_refc")
+        c = st.columns(2)
+        e_elapsed = c[0].number_input("Months since first site could open", 0.0, value=6.0, key="e_el")
+        e_enrolled = c[1].number_input("Patients randomised so far", 0, value=60, key="e_en")
+        st.caption("The planned rate is updated with what has actually happened (Bayesian gamma update; the "
+                   "uncertainty CV above sets how strongly the plan is believed), then the remainder is simulated.")
+    if not refc:
+        e_elapsed, e_enrolled = 0.0, 0
+
+    ev_kw = None
+    if kind == "survival":
+        st.markdown("**Event accrual (time-to-event)**")
+        c = st.columns(4)
+        ev_target = c[0].number_input("Events for final analysis", 1, value=int(math.ceil(design.events())), key="e_ev")
+        ev_med = c[1].number_input("Control median (months)", 0.1, value=12.0, key="e_med")
+        ev_hr = c[2].number_input("Assumed HR", 0.05, 3.0, float(round(prior_mean_effect, 3)), key="e_hr")
+        ev_do = c[3].number_input("Loss to follow-up per year", 0.0, 0.9, 0.05, 0.01, key="e_do")
+        ev_kw = dict(median_control=ev_med, hr=ev_hr, target_events=int(ev_target), ratio=float(ratio),
+                     dropout_per_year=ev_do)
+
+    c = st.columns(3)
+    e_sims = c[0].select_slider("Simulations", [500, 1000, 2000, 5000], 2000, key="e_sims")
+    deadline = c[1].number_input("Deadline for last patient in (month)", 0.5, value=18.0, key="e_dl")
+    plan_kw = dict(target_n=int(e_target), n_sites=int(e_sites), rate_per_site=float(e_rate),
+                   activation_start=float(e_a0), activation_end=float(max(e_a0, e_a1)), site_ramp=float(e_ramp),
+                   site_cv=float(e_scv), rate_uncertainty=float(e_rcv), screen_fail=float(e_sf))
+    if e_enrolled >= e_target:
+        st.warning("Already at or above the target; nothing left to simulate.")
+    else:
+        res_e = _run_enrollment(plan_kw, ev_kw, int(e_sims), int(seed), float(e_elapsed), int(e_enrolled))
+        plan = res_e.plan
+        se = res_e.summary()
+        m = st.columns(4)
+        m[0].metric("Planned last patient in", f"month {plan.expected_completion(res_e.mean_rate, e_enrolled, e_elapsed):.1f}",
+                    help="Using the average rate with no randomness: the usual spreadsheet answer.")
+        m[1].metric("Simulated LPI (median)", f"month {se['lpi_p50']:.1f}")
+        m[2].metric("80% interval", f"{se['lpi_p10']:.1f} – {se['lpi_p90']:.1f}")
+        m[3].metric(f"P(LPI by month {deadline:g})", pct(res_e.prob_complete_by(deadline)))
+        cap = [f"Patients to screen: **~{plan.screened_needed:,}**"]
+        if refc:
+            cap.append(f"Updated rate: **{res_e.mean_rate:.2f}**/site/month (plan {e_rate:.2f}; CV now "
+                       f"{res_e.rate_cv:.2f})")
+        if se["lpi_p_within_horizon"] < 1:
+            cap.append(f"⚠ {pct(1 - se['lpi_p_within_horizon'])} of simulations never finish within the horizon")
+        st.caption(" · ".join(cap))
+
+        st.markdown("**Cumulative enrollment**: median, 50% and 80% bands; dashed orange = plan; dashed gray = target")
+        st.altair_chart(fan_chart(res_e, res_e.enroll_q, res_e.enroll_mean, e_target, "Patients randomised",
+                                  res_e.expected), width="stretch")
+
+        c1, c2 = st.columns(2)
+        hchart = month_hist(res_e.completion, "Last patient in (month)")
+        if hchart is not None:
+            c1.markdown("**When does enrollment finish?**")
+            c1.altair_chart(hchart, width="stretch")
+        if ev_kw is not None:
+            c2.markdown("**When is the final analysis?** (target events reached)")
+            ha = month_hist(res_e.event_completion, "Final analysis (month)")
+            if ha is not None:
+                c2.altair_chart(ha, width="stretch")
+            m = st.columns(3)
+            m[0].metric("Final analysis (median)", f"month {se['analysis_p50']:.1f}")
+            m[1].metric("80% interval", f"{se['analysis_p10']:.1f} – {se['analysis_p90']:.1f}")
+            m[2].metric("Events expected at LPI (median)",
+                        f"{np.interp(se['lpi_p50'], res_e.grid, res_e.events_q[0.5]):.0f}")
+            st.markdown("**Cumulative events**: median, 50% and 80% bands; dashed gray = target events")
+            st.altair_chart(fan_chart(res_e, res_e.events_q, res_e.events_mean, ev_kw["target_events"], "Events"),
+                            width="stretch")
+
+        st.markdown("**How many sites to hit the deadline?**")
+        c = st.columns([1, 1, 2])
+        conf = c[0].slider("With probability", 0.5, 0.95, 0.8, 0.05, key="e_conf")
+        if c[1].button("Find sites needed"):
+            with st.spinner("Searching…"):
+                ns = sites_needed(EnrollmentPlan(**plan_kw), deadline, conf, n_sims=500, seed=int(seed))
+            c[2].markdown(f"**{ns} sites** gives ≥{conf:.0%} chance of last patient in by month {deadline:g}."
+                          if ns else "Not reachable: sites open too late or rate too low. Move the deadline "
+                                     "or open sites sooner.")
+
+        tbl = pd.DataFrame(res_e.monthly_table())
+        with st.expander("Month-by-month table"):
+            fmt_cols = {c_: "{:.0f}" for c_ in tbl.columns if c_ not in ("month",) and not c_.startswith("p_")}
+            fmt_cols.update({c_: "{:.0%}" for c_ in tbl.columns if c_.startswith("p_")})
+            st.dataframe(tbl.style.format(fmt_cols), hide_index=True, width="stretch")
+            st.download_button("Download CSV", tbl.to_csv(index=False), "enrollment_forecast.csv", "text/csv")
 
 # ---------------- Portfolio
 with tab_port:
