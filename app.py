@@ -12,7 +12,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from trialpower import (EffectPrior, Phase2Evidence, TrialDesign, event_probability, make_endpoint,
+from trialpower import (GRID_PARAMS, EffectPrior, Phase2Evidence, TrialDesign, event_probability, make_endpoint,
+                        power_grid,
                         pos_curve, simulate_pos)
 from trialpower.portfolio import COLUMNS, evaluate, load_yaml
 
@@ -62,11 +63,29 @@ c1, c2 = sb.columns(2)
 alpha = c1.number_input("Alpha", 0.0001, 0.5, 0.05, 0.005, format="%.4f")
 sides = c2.selectbox("Sides", [2, 1])
 n_total = sb.number_input("Total N enrolled", 4, value=400, step=10)
-c1, c2 = sb.columns(2)
-ratio = c1.number_input("Ratio T:C", 0.1, 10.0, 1.0, 0.5)
-dropout = c2.number_input("Dropout", 0.0, 0.9, 0.10, 0.05)
+ratio = sb.number_input("Allocation ratio T:C", 0.1, 10.0, 1.0, 0.5)
 target = sb.slider("Target power", 0.5, 0.99, 0.90, 0.01)
-design = TrialDesign(ep, n_total, alpha, sides, ratio, dropout)
+
+sb.subheader("Dropout")
+per_arm = sb.checkbox("Different dropout by arm", help="Drug-arm dropout is often higher (adverse events).")
+if per_arm:
+    c1, c2 = sb.columns(2)
+    dropout_t = c1.number_input("Drug arm", 0.0, 0.9, 0.15, 0.05)
+    dropout_c = c2.number_input("Control arm", 0.0, 0.9, 0.10, 0.05)
+    dropout = max(dropout_t, dropout_c)
+else:
+    dropout = sb.number_input("Dropout (both arms)", 0.0, 0.9, 0.10, 0.05)
+    dropout_t = dropout_c = None
+handling_opts = ["exclude", "dilute"] + (["nri"] if kind == "binary" else [])
+handling = sb.selectbox(
+    "How dropouts are analysed", handling_opts,
+    format_func={"exclude": "Excluded (complete-case / censored)",
+                 "dilute": "ITT: dropouts lose drug effect (dilution)",
+                 "nri": "ITT: dropouts = treatment failures (NRI)"}.get,
+    help="Excluded: fewer evaluable patients, effect unchanged; for time-to-event, dropouts are censored (fewer events). "
+         "Dilution: everyone analysed, but drug-arm dropouts get no benefit, so effect x (1 - drug-arm dropout). "
+         "NRI: dropouts in both arms counted as non-responders.")
+design = TrialDesign(ep, n_total, alpha, sides, ratio, dropout, dropout_t, dropout_c, handling)
 
 sb.subheader("Phase II evidence")
 mode = sb.radio("Input", ["Summary data", "Estimate + SE"], horizontal=True)
@@ -143,8 +162,12 @@ with tab_pow:
     m[2].metric(f"MDE ({target:.0%} power)", f3(mde), help="Smallest TRUE effect with target power at planned N")
     m[3].metric("Critical observed effect", f3(crit), help="Smallest OBSERVED effect that is statistically significant")
     ev_txt = f" · **{design.events():.0f} events** expected" if kind == "survival" else ""
-    st.caption(f"Assumed effect {f3(assumed)} ({ep.effect_label}). Evaluable per arm: "
-               f"{design.arms()[0]:.0f} T / {design.arms()[1]:.0f} C{ev_txt}.")
+    dil_txt = ""
+    if handling != "exclude":
+        dil_txt = (f" Effect the ITT analysis actually sees: "
+                   f"**{f3(float(ep.from_benefit(design.analysis_benefit(ep.to_benefit(assumed)))))}**.")
+    st.caption(f"Assumed effect {f3(assumed)} ({ep.effect_label}). Analysed per arm: "
+               f"{design.arms()[0]:.0f} T / {design.arms()[1]:.0f} C{ev_txt}.{dil_txt}")
 
     hi_n = max(n_total * 2, ss["n_total"] * 1.3 if np.isfinite(ss["n_total"]) else n_total * 2)
     ngrid = np.unique(np.linspace(10, hi_n, 120).round())
@@ -181,6 +204,116 @@ with tab_pow:
                      "N control": s["n_c"], **({"Events": s["events"]} if kind == "survival" else {}),
                      f"MDE at N={n_total}": f3(design.mde(p))})
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    # ---- heatmap
+    st.markdown("#### Power heatmap")
+    nuis = {"continuous": "sd", "binary": "p_control", "survival": "event_prob"}[kind]
+    outcome_word = {"continuous": "mean", "binary": "response rate", "survival": "median survival"}[kind]
+    presets = {
+        "arms": (f"Drug-arm vs control-arm {outcome_word}", "treat_outcome", "control_outcome"),
+        "n": ("Treatment effect vs total N", "effect", "n_total"),
+        "dropout": ("Treatment effect vs dropout", "effect", "dropout"),
+        "nuis": (f"Treatment effect vs {GRID_PARAMS[nuis].lower()}", "effect", nuis),
+    }
+    preset = st.selectbox("Axes", list(presets), format_func=lambda k: presets[k][0])
+    _, xp, yp = presets[preset]
+
+    # sensible default ranges around the current assumptions
+    a = float(assumed)
+    if kind == "survival":
+        base_ctrl = st.number_input("Control-arm median survival (months)", 0.1, value=12.0) if preset == "arms" else 12.0
+    elif kind == "binary":
+        base_ctrl = ep.p_control
+    else:
+        base_ctrl = float(mc) if mode == "Summary data" else 0.0
+
+    def default_range(p):
+        if p == "effect":
+            if kind == "survival":
+                return float(np.exp(np.log(a) * 2)), min(1.0, float(np.exp(np.log(a) * 0.25)))
+            lo, hi = sorted([a * 0.25, a * 2.0])
+            if kind == "binary":
+                lo, hi = max(lo, -ep.p_control + 0.01), min(hi, 0.99 - ep.p_control)
+            return lo, hi
+        if p == "treat_outcome":
+            if kind == "survival":
+                return base_ctrl, base_ctrl / a ** 2
+            if kind == "binary":
+                return max(0.01, ep.p_control + min(0, 2 * a)), min(0.99, ep.p_control + max(0, 2 * a))
+            return tuple(sorted([base_ctrl, base_ctrl + 2 * a]))
+        if p == "control_outcome":
+            if kind == "survival":
+                return base_ctrl * 0.6, base_ctrl * 1.4
+            if kind == "binary":
+                return max(0.01, ep.p_control - 0.15), min(0.99, ep.p_control + 0.15)
+            return base_ctrl - abs(a), base_ctrl + abs(a)
+        if p == "n_total":
+            return max(10.0, n_total * 0.5), n_total * 2.0
+        if p == "dropout":
+            return 0.0, 0.4
+        if p == "sd":
+            return ep.sd * 0.6, ep.sd * 1.6
+        if p == "p_control":
+            return max(0.01, ep.p_control - 0.15), min(0.99, ep.p_control + 0.15)
+        if p == "event_prob":
+            return max(0.05, ep.event_prob - 0.3), min(1.0, ep.event_prob + 0.2)
+
+    c = st.columns(5)
+    xlo, xhi = default_range(xp)
+    ylo, yhi = default_range(yp)
+    xlab = "True HR" if (xp == "effect" and kind == "survival") else (
+        f"True {ep.effect_label}" if xp == "effect" else GRID_PARAMS[xp])
+    ylab = GRID_PARAMS[yp]
+    xlo = c[0].number_input(f"{xlab}: from", value=float(round(xlo, 4)), format="%.4g", key=f"xlo_{preset}_{kind}")
+    xhi = c[1].number_input("to", value=float(round(xhi, 4)), format="%.4g", key=f"xhi_{preset}_{kind}")
+    ylo = c[2].number_input(f"{ylab}: from", value=float(round(ylo, 4)), format="%.4g", key=f"ylo_{preset}_{kind}")
+    yhi = c[3].number_input("to", value=float(round(yhi, 4)), format="%.4g", key=f"yhi_{preset}_{kind}")
+    steps = c[4].slider("Steps", 3, 15, 9)
+    xv = np.linspace(xlo, xhi, steps)
+    yv = np.linspace(ylo, yhi, steps)
+    if yp == "n_total":
+        yv = np.round(yv)
+    grid = power_grid(design, assumed, (xp, list(xv)), (yp, list(yv)), control_outcome=base_ctrl)
+
+    def lbl(v, p):
+        if p == "n_total":
+            return f"{v:.0f}"
+        if p in ("dropout", "dropout_t") or (p in ("p_control", "event_prob")) or (kind == "binary" and p.endswith("outcome")):
+            return f"{100 * v:.0f}%" if abs(100 * v - round(100 * v)) < 1e-6 else f"{100 * v:.1f}%"
+        return f"{v:.3g}"
+
+    xs = [lbl(v, xp) for v in xv]
+    ys = [lbl(v, yp) for v in yv]
+    hm = pd.DataFrame([{"x": xs[j], "y": ys[i], "Power": grid[i, j]} for i in range(len(yv)) for j in range(len(xv))])
+    hm["label"] = hm["Power"].map(lambda p: "–" if not np.isfinite(p) else f"{100 * p:.0f}%")
+    hm["meets"] = hm["Power"] >= target
+    enc_x = alt.X("x:O", sort=xs, title=xlab, axis=alt.Axis(labelAngle=0))
+    enc_y = alt.Y("y:O", sort=list(reversed(ys)), title=ylab)
+    rect = alt.Chart(hm).mark_rect(stroke="white", strokeWidth=2).encode(
+        x=enc_x, y=enc_y,
+        color=alt.Color("Power:Q", scale=alt.Scale(scheme="blues", domain=[0, 1]),
+                        legend=alt.Legend(format="%", title="Power")),
+        tooltip=[alt.Tooltip("x:O", title=xlab), alt.Tooltip("y:O", title=ylab),
+                 alt.Tooltip("Power:Q", format=".1%")])
+    def text_layer(meets, weight):
+        return alt.Chart(hm[hm["meets"] == meets]).mark_text(fontSize=12, fontWeight=weight).encode(
+            x=enc_x, y=enc_y, text="label:N",
+            color=alt.condition("datum.Power > 0.55", alt.value("white"), alt.value("#191919")))
+
+    st.altair_chart((rect + text_layer(False, "normal") + text_layer(True, "bold")).properties(height=max(260, 38 * steps)), width="stretch")
+    notes = [f"**Bold** cells meet the {target:.0%} target."]
+    if preset == "arms":
+        if kind == "survival":
+            notes.append("HR = control median ÷ drug median (exponential survival); P(event) held fixed.")
+        elif kind == "continuous":
+            notes.append("With a common SD, power depends only on the drug − control difference, so it is constant "
+                         "along the diagonals.")
+        else:
+            notes.append("Variance depends on both rates, so the same difference has different power at different "
+                         "control rates.")
+    if preset != "n":
+        notes.append(f"Total N = {n_total}.")
+    st.caption(" ".join(notes))
 
 # ---------------- PoS
 with tab_pos:

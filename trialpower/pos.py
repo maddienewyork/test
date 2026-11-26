@@ -16,8 +16,8 @@ Two independent estimators are provided:
   can also ask "how often is a win a *real* win?".
 
 Success rule (per trial): statistically significant in the favourable direction
-AND (optionally) the observed effect is at least the minimum clinically
-meaningful effect ``mcid`` (e.g. the target-product-profile threshold). With
+AND (optionally) the observed effect (on the analysis scale, i.e. after any
+dropout dilution) is at least the minimum clinically meaningful effect ``mcid`` (e.g. the target-product-profile threshold). With
 ``n_trials > 1`` (e.g. two pivotal trials for FDA) *all* trials must succeed;
 they share the same true effect, so they are correlated — PoS(2 trials) is not
 PoS(1)^2.
@@ -41,23 +41,24 @@ def success_threshold(design: TrialDesign, mcid=None, n_total=None) -> float:
     """Minimum *observed* effect (natural units) that counts as a success:
     the stricter of the significance boundary and the MCID."""
     nt, nc = design.arms(n_total)
-    c = float(design.endpoint.critical_benefit(nt, nc, design.a1))
+    ep = design.analysis_endpoint
+    c = float(ep.critical_benefit(nt, nc, design.a1))
     m = _mcid_b(design, mcid)
     if m is not None:
         c = max(c, m)
-    return float(design.endpoint.from_benefit(c))
+    return float(ep.from_benefit(c))
 
 
 def prob_success_given_effect(design: TrialDesign, b, mcid=None, n_total=None):
     """P(one trial succeeds | true benefit b) — vectorised over b."""
     nt, nc = design.arms(n_total)
-    ep = design.endpoint
+    ep = design.analysis_endpoint
+    b = design.analysis_benefit(b)
     p_sig = ep.power(b, nt, nc, design.a1)
     m = _mcid_b(design, mcid)
     if m is None or m <= float(ep.critical_benefit(nt, nc, design.a1)):
         return p_sig
     # MCID is the binding hurdle: P(observed benefit >= mcid) (normal approximation)
-    b = np.asarray(b, dtype=float)
     return np.minimum(p_sig, stats.norm.cdf((b - m) / ep.se(b, nt, nc)))
 
 
@@ -102,7 +103,7 @@ def simulate_pos(design: TrialDesign, prior: EffectPrior, mcid=None, n_trials=1,
                  n_sims=100_000, seed=None, n_total=None) -> PoSResult:
     """Monte Carlo probability of success."""
     rng = np.random.default_rng(seed)
-    ep = design.endpoint
+    ep = design.analysis_endpoint
     nt, nc = design.arms(n_total)
     m = _mcid_b(design, mcid)
 
@@ -112,7 +113,7 @@ def simulate_pos(design: TrialDesign, prior: EffectPrior, mcid=None, n_trials=1,
     any_ok = np.zeros(n_sims, bool)
     b_hat_first = None
     for i in range(n_trials):
-        b_hat, sig = ep.simulate(b_true, nt, nc, design.a1, rng)
+        b_hat, sig = ep.simulate(design.analysis_benefit(b_true), nt, nc, design.a1, rng)
         ok = sig if m is None else sig & (b_hat >= m)
         all_sig &= sig
         all_ok &= ok
@@ -137,7 +138,7 @@ def simulate_pos(design: TrialDesign, prior: EffectPrior, mcid=None, n_trials=1,
         ppv_mcid=ppv_m,
         success_threshold=success_threshold(design, mcid, n_total),
         critical_effect=float(ep.from_benefit(ep.critical_benefit(nt_, nc_, design.a1))),
-        true_effect=ep.from_benefit(b_true),
+        true_effect=design.endpoint.from_benefit(b_true),
         observed_effect=ep.from_benefit(b_hat_first),
         success=all_ok,
     )

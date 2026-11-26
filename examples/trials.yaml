@@ -14,6 +14,7 @@ defaults:
   sides: 2           # 2 = two-sided test (alpha/2 in the favourable direction)
   ratio: 1           # allocation treatment:control
   dropout: 0.10
+  dropout_handling: exclude  # exclude (complete-case) | dilute (ITT, dropouts lose effect) | nri (binary)
   haircut: 0.20      # shrink Phase II effect 20% towards zero
   weight: 1.0        # 0.5 = treat Phase II as half as informative
   prob_effect: 1.0   # P(drug truly works); <1 adds a point mass at zero effect
@@ -35,6 +36,9 @@ trials:
     n_total: 300
     ratio: 2
     phase2: {x_t: 22, n_t: 50, x_c: 7, n_c: 50}
+    dropout_t: 0.15           # per-arm dropout (overrides `dropout`)
+    dropout_c: 0.10
+    dropout_handling: nri     # exclude | dilute | nri (binary only)
     mcid: 0.10
     n_trials: 2               # two replicate pivotal trials
 

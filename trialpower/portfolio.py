@@ -13,13 +13,13 @@ from .pos import simulate_pos
 # Flat column schema shared by the YAML loader, the CLI and the app's table editor.
 COLUMNS = [
     "name", "endpoint", "higher_is_better", "sd", "p_control", "event_prob",
-    "alpha", "sides", "n_total", "ratio", "dropout",
+    "alpha", "sides", "n_total", "ratio", "dropout", "dropout_t", "dropout_c", "dropout_handling",
     "phase2_estimate", "phase2_se", "haircut", "weight", "prob_effect",
     "assumed_effect", "mcid", "n_trials", "target_power",
 ]
 
 DEFAULTS = {
-    "alpha": 0.05, "sides": 2, "ratio": 1.0, "dropout": 0.0,
+    "alpha": 0.05, "sides": 2, "ratio": 1.0, "dropout": 0.0, "dropout_handling": "exclude",
     "haircut": 0.0, "weight": 1.0, "prob_effect": 1.0,
     "n_trials": 1, "target_power": 0.9, "assumed_effect": None, "mcid": None,
 }
@@ -46,8 +46,10 @@ def build(row: dict):
         row["endpoint"], sd=row.get("sd"), p_control=row.get("p_control"),
         event_prob=row.get("event_prob"), higher_is_better=bool(row["higher_is_better"]),
     )
+    opt = {k: (None if _blank(row.get(k)) else float(row[k])) for k in ("dropout_t", "dropout_c")}
     design = TrialDesign(ep, float(row["n_total"]), float(row["alpha"]), int(row["sides"]),
-                         float(row["ratio"]), float(row["dropout"]))
+                         float(row["ratio"]), float(row["dropout"]), **opt,
+                         dropout_handling=str(row.get("dropout_handling") or "exclude"))
     prior = EffectPrior.from_phase2(
         ep, Phase2Evidence(float(row["phase2_estimate"]), float(row["phase2_se"])),
         haircut=float(row["haircut"]), weight=float(row["weight"]), prob_effect=float(row["prob_effect"]))

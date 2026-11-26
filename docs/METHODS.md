@@ -12,6 +12,19 @@ Power is the probability of a *significant result in the favourable direction*
 (two-sided α means α/2 in that direction). Dropout reduces evaluable N;
 sample sizes are rounded up per arm then inflated for dropout.
 
+**Dropout models** (per-arm rates allowed — drug-arm dropout is often higher):
+
+| Handling | What happens | Typical use |
+|---|---|---|
+| Excluded (complete-case) | analysed N per arm = N × (1 − dropout); effect unchanged; for time-to-event dropouts are censored, so fewer events | per-protocol / completers, MMRM-style estimands |
+| ITT dilution | everyone analysed, drug-arm dropouts get no drug benefit → effect × (1 − drug-arm dropout) | treatment-policy estimand, retrieved-dropout data |
+| ITT non-responder imputation (binary) | dropouts in both arms counted as failures: pT·(1−dT), pC·(1−dC) | responder endpoints (e.g. IGA, ACR20) |
+
+**Power heatmap** — power in each cell over two assumptions: drug-arm vs
+control-arm outcome (means, response rates, or median survival with
+HR = median_C / median_T), or treatment effect vs N, dropout, or the SD / control
+rate / event probability.
+
 * **MDE** – the smallest *true* effect with the target power at the planned N.
 * **Critical observed effect** – the smallest *observed* effect that reaches p < α.
   Useful reality check: an observed effect only just past this line is a "win"

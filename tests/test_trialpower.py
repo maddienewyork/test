@@ -112,3 +112,60 @@ def test_example_portfolio_runs():
         out = evaluate(row, n_sims=20_000)
         assert 0 <= out["pos_mc"] <= 1
         assert abs(out["pos_mc"] - out["pos_assurance"]) < 0.02
+
+
+# --- dropout models -------------------------------------------------------------
+
+def test_dropout_exclude_per_arm():
+    d = TrialDesign(Continuous(sd=1.0), n_total=200, dropout_t=0.3, dropout_c=0.1)
+    assert d.arms() == pytest.approx((70, 90))
+
+
+def test_dropout_dilution_scales_effect():
+    # ITT dilution: power with effect 0.5 and 20% drug-arm dropout == no-dropout power at effect 0.4
+    dil = TrialDesign(Continuous(sd=1.0), n_total=200, dropout=0.2, dropout_handling="dilute")
+    ref = TrialDesign(Continuous(sd=1.0), n_total=200)
+    assert dil.power(0.5) == pytest.approx(ref.power(0.4))
+    # dilution typically needs more patients than complete-case for the same dropout
+    exc = TrialDesign(Continuous(sd=1.0), n_total=200, dropout=0.2)
+    assert dil.sample_size(0.5, 0.9)["n_total"] > exc.sample_size(0.5, 0.9)["n_total"]
+
+
+def test_dropout_nri_binary():
+    d = TrialDesign(Binary(p_control=0.2), n_total=300, dropout_t=0.2, dropout_c=0.1, dropout_handling="nri")
+    ref = TrialDesign(Binary(p_control=0.2 * 0.9), n_total=300)
+    # pT 0.5 -> 0.4 after NRI, pC 0.2 -> 0.18
+    assert d.power(0.3) == pytest.approx(ref.power(0.4 - 0.18))
+    with pytest.raises(ValueError):
+        TrialDesign(Continuous(sd=1), n_total=100, dropout_handling="nri")
+
+
+def test_dropout_dilution_flows_into_pos():
+    ep = Continuous(sd=1.0)
+    d = TrialDesign(ep, n_total=300, dropout=0.25, dropout_handling="dilute")
+    prior = EffectPrior(0.4, 0.1)
+    r = simulate_pos(d, prior, n_sims=100_000, seed=2)
+    assert r.pos == pytest.approx(r.pos_assurance, abs=0.01)
+    assert r.pos < assurance(TrialDesign(ep, n_total=300), prior)
+
+
+# --- heatmap --------------------------------------------------------------------
+
+def test_power_grid_arm_outcomes_binary():
+    from trialpower import power_grid
+    d = TrialDesign(Binary(p_control=0.3), n_total=200)
+    pt, pc = [0.4, 0.5, 0.6], [0.2, 0.3]
+    g = power_grid(d, None, ("treat_outcome", pt), ("control_outcome", pc))
+    assert g.shape == (2, 3)
+    assert g[1, 2] == pytest.approx(TrialDesign(Binary(p_control=0.3), n_total=200).power(0.3))
+    assert np.all(np.diff(g, axis=1) > 0)  # more drug effect -> more power
+
+
+def test_power_grid_effect_vs_n_and_survival_medians():
+    from trialpower import power_grid
+    d = TrialDesign(Continuous(sd=1.0), n_total=100)
+    g = power_grid(d, 0.5, ("effect", [0.3, 0.5]), ("n_total", [100, 200]))
+    assert g[1, 1] == pytest.approx(d.power(0.5, 200))
+    s = TrialDesign(Survival(event_prob=0.7), n_total=400)
+    g = power_grid(s, None, ("treat_outcome", [15.0]), ("control_outcome", [10.0]))
+    assert g[0, 0] == pytest.approx(s.power(10 / 15))

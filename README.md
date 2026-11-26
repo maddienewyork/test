@@ -5,6 +5,8 @@ Two connected tools:
 1. **Power analysis.** Standard frequentist power and sample size for a two-arm superiority trial.
    You set alpha, sidedness, N, allocation ratio, dropout and target power for each trial.
    - Continuous endpoints (exact noncentral-t), binary/responder endpoints (pooled z), and time-to-event endpoints (log-rank / Schoenfeld; includes an event-probability helper that works from medians, accrual and follow-up).
+   - Dropout model: one rate or per-arm rates, analysed as **excluded** (complete-case), **ITT dilution**, or **non-responder imputation** (binary).
+   - **Power heatmap**: drug-arm vs control-arm outcome, or effect vs N, dropout, or SD / control rate.
    - Outputs: power, N for the target power, **MDE** (the smallest *true* effect you can detect), and the **critical observed effect** (the smallest *observed* effect that is significant).
 2. **Probability of success (PoS).** Turns Phase II data into a prior on the true Phase III effect and averages power over that uncertainty.
    - Computed by **Monte Carlo** (simulates the trial outcomes) and by numerical integration (a deterministic cross-check).
